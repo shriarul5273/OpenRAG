@@ -1,0 +1,2 @@
+"""Metrics utilities for OpenRAG."""
+

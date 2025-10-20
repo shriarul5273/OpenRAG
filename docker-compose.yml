@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  chroma:
+    image: ghcr.io/chroma-core/chroma:0.5.3
+    container_name: openrag-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma-data:/chroma/data
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openrag-api
+    environment:
+      OPENRAG_CHROMA_HOST: chroma
+      OPENRAG_CHROMA_PORT: "8000"
+      OPENRAG_CHROMA_SSL: "false"
+      OPENRAG_MAX_CHUNKS: "5"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - chroma
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: openrag-ui
+    environment:
+      OPENRAG_API_URL: http://api:8000
+    ports:
+      - "7860:7860"
+    depends_on:
+      - api
+
+volumes:
+  chroma-data:
