@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openrag"
-version = "0.1.0"
+version = "0.1.1"
 description = "Modular RAG pipeline with FastAPI backend and Gradio UI."
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -26,7 +26,7 @@ dependencies = [
   "python-dotenv==1.0.1",
   "structlog==24.1.0",
   "tenacity==8.3.0",
-  "transformers @ git+https://github.com/huggingface/transformers.git@8fc54209130d48d3df9a4b1f59fcdaed3a8e0f34",
+  "transformers==4.45.2",
   "uvicorn[standard]==0.30.3",
 ]
 

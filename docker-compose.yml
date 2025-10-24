@@ -8,6 +8,11 @@ services:
       - "8001:8000"
     volumes:
       - chroma-data:/chroma/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/heartbeat" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   api:
     build:
       context: .
@@ -21,7 +26,13 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - chroma
+      chroma:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz/ready" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   ui:
     build:
       context: .
@@ -32,7 +43,8 @@ services:
     ports:
       - "7860:7860"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   chroma-data:

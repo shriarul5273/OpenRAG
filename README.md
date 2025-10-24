@@ -2,7 +2,7 @@
 
 
 OpenRAG is a reference implementation of a retrieval augmented generation (RAG) stack built around
-FastAPI, LangChain, Chroma, and Qwen models. The project is structured to showcase modular ingestion,
+FastAPI, LangChain, Chroma, and optional Qwen/Transformers models. The project is structured to showcase modular ingestion,
 embedding, retrieval, and generation layers with a Gradio-based user experience.
 
 ## Screenshot
@@ -26,6 +26,8 @@ uv run ruff check .
 
 If you prefer `pip`, install the dependencies from `pyproject.toml` and run the same commands within
 an activated virtual environment.
+
+Copy `.env.example` to `.env` and adjust values as needed to configure Chroma, embeddings, upload size limits, and CORS.
 
 ## Repository Layout
 
@@ -77,7 +79,7 @@ an activated virtual environment.
 - `docker-compose.yml` – local stack orchestrating Chroma, the API, and the UI.
 - `src/openrag/api` – FastAPI app and pydantic schemas.
 - `src/openrag/ingestion` – LangChain-powered document ingestion services.
-- `src/openrag/embeddings` – deterministic hash embeddings, optional Qwen embeddings, and Chroma store.
+- `src/openrag/embeddings` – deterministic hash embeddings, optional model embeddings (default BGE small), and Chroma store.
 - `src/openrag/retrieval` – retriever contracts and Chroma-backed implementation.
 - `src/openrag/services` – orchestration for generation and query flow.
 - `src/openrag/metrics` – Prometheus histograms and structured logging helpers.
@@ -104,8 +106,7 @@ The CI workflow (`.github/workflows/ci.yml`) mirrors the local developer command
 - `uv run pytest --cov=src --cov-report=xml`
 - `uv run mypy src tests`
 
-Artifacts contain coverage reports per Python version. The `compose-smoke` job is stubbed and will be
-implemented once the Docker Compose stack lands.
+Artifacts contain coverage reports per Python version. A simple compose smoke script is included (`scripts/compose_smoke.py`).
 
 ## Ingestion Pipeline
 
@@ -115,10 +116,10 @@ loaders with `RecursiveCharacterTextSplitter`. Update `IngestionConfig` to tune 
 
 ## Embeddings & Vector Store
 
-`openrag.embeddings.QwenEmbeddingBackend` wraps LangChain's HuggingFace embeddings so that Qwen models
-can be enabled by setting `use_model=True`. By default, a deterministic hash backend keeps tests fast
-and offline friendly. `ChromaEmbeddingStore` manages persistence and similarity search, defaulting to
-an in-memory client unless a `persist_directory` is provided.
+`openrag.embeddings.QwenEmbeddingBackend` wraps LangChain's HuggingFace embeddings so that model
+embeddings can be enabled by setting `use_model=True`. By default, a deterministic hash backend keeps
+tests fast and offline friendly. `ChromaEmbeddingStore` manages persistence and similarity search,
+defaulting to an in-memory client unless a `persist_directory` is provided.
 
 ## Retrieval & Generation
 
@@ -131,8 +132,10 @@ Qwen weights are available. Prompts embed citation markers so UI layers can rend
 Launch the FastAPI app with `uvicorn openrag.api.app:app --reload`. The OpenAPI schema documents the
 `POST /documents` and `POST /query` endpoints.
 
-- `/documents`: upload PDF/DOCX/TXT files (multipart) to ingest and index them.
+- `/documents`: upload PDF/DOCX/TXT files (multipart) to ingest and index them. Uploads are streamed to disk with configurable file/type/size limits.
 - `/query`: submit a JSON payload `{"question": "...", "top_k": 3}` to receive an answer + citations.
+- `/index` (DELETE): reset the vector index (demo convenience).
+- `/healthz`, `/healthz/ready`: basic and readiness endpoints.
 
 Run integration coverage with:
 
@@ -164,8 +167,7 @@ make compose-down
 
 The compose stack starts the API, Gradio UI, and a dedicated Chroma service. `OPENRAG_API_URL`
 controls the URL the UI targets, while `OPENRAG_CHROMA_HOST/PORT/SSL` configure remote Chroma
-connections for the API container. The `make compose-smoke` target expects `scripts/compose_smoke.py`
-to be present; add the script before invoking the smoke check.
+connections for the API container. `make compose-smoke` runs a basic readiness probe.
 
 ## Observability
 

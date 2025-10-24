@@ -92,7 +92,8 @@ class OpenRAGClient:
             files.append(("files", (path.name, data, mime or "application/octet-stream")))
         response = self._client.post("/documents", files=files)
         if response.status_code >= 400:
-            raise APIError(f"Upload failed ({response.status_code}): {response.text}")
+            cid = response.headers.get("X-Correlation-ID", "-")
+            raise APIError(f"Upload failed ({response.status_code}) [cid={cid}]: {response.text}")
         return DocumentIngestionResponse.model_validate(response.json())
 
     def query(self, question: str, top_k: int | None = None) -> QueryResponse:
@@ -101,9 +102,11 @@ class OpenRAGClient:
             payload["top_k"] = top_k
         response = self._client.post("/query", json=payload)
         if response.status_code == 404:
-            raise APIError("No relevant documents found. Upload content before querying.")
+            cid = response.headers.get("X-Correlation-ID", "-")
+            raise APIError(f"No relevant documents found [cid={cid}]. Upload content before querying.")
         if response.status_code >= 400:
-            raise APIError(f"Query failed ({response.status_code}): {response.text}")
+            cid = response.headers.get("X-Correlation-ID", "-")
+            raise APIError(f"Query failed ({response.status_code}) [cid={cid}]: {response.text}")
         return QueryResponse.model_validate(response.json())
 
     def close(self) -> None:

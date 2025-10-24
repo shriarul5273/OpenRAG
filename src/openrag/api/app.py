@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 import chromadb
@@ -96,8 +97,18 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     deps = dependencies or _build_dependencies(settings)
 
     configure_logging()
-    app = FastAPI(title="OpenRAG API", version="0.1.0")
+    app = FastAPI(title="OpenRAG API", version="0.1.1")
     app.state.dependencies = deps
+
+    # Optional CORS
+    if settings.cors_allow_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_allow_origins),
+            allow_credentials=settings.cors_allow_credentials,
+            allow_methods=list(settings.cors_allow_methods),
+            allow_headers=list(settings.cors_allow_headers),
+        )
 
     @app.middleware("http")
     async def add_correlation_id(request: Request, call_next):  # type: ignore[override]
@@ -141,25 +152,52 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
 
     @app.post("/documents", response_model=DocumentIngestionResponse, status_code=status.HTTP_201_CREATED)
     async def upload_documents(
+        request: Request,
         files: Sequence[UploadFile] = File(...),
         ingestor: DocumentIngestor = Depends(get_ingestor),
         store: ChromaEmbeddingStore = Depends(get_store),
     ) -> DocumentIngestionResponse:
         if not files:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
+        if len(files) > settings.max_files:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Too many files")
+
+        # Check total payload if provided
+        total_len = request.headers.get("content-length")
+        if total_len and int(total_len) > settings.max_total_upload_mb * 1024 * 1024:
+            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Payload too large")
         dataset_id = uuid4().hex
         with tempfile.TemporaryDirectory() as tmpdir:
             saved_paths: list[Path] = []
             for upload in files:
                 filename = upload.filename or f"upload-{uuid4().hex}"
                 suffix = Path(filename).suffix.lower()
-                if suffix not in ALLOWED_EXTENSIONS:
+                allowed = set(settings.allowed_extensions_tuple) or ALLOWED_EXTENSIONS
+                if suffix not in allowed:
                     await upload.close()
                     msg = f"Unsupported file type: {suffix or 'unknown'}"
                     raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=msg)
                 destination = Path(tmpdir) / filename
-                async_data = await upload.read()
-                destination.write_bytes(async_data)
+                # Stream copy to avoid loading entire file into memory
+                bytes_written = 0
+                with destination.open("wb") as out_f:
+                    while True:
+                        chunk = await upload.read(1024 * 1024)  # 1MB chunks
+                        if not chunk:
+                            break
+                        out_f.write(chunk)
+                        bytes_written += len(chunk)
+                        if bytes_written > settings.max_upload_size_mb * 1024 * 1024:
+                            await upload.close()
+                            # Remove partial file
+                            try:
+                                destination.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            raise HTTPException(
+                                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                detail=f"File too large (>{settings.max_upload_size_mb}MB): {filename}",
+                            )
                 await upload.close()
                 saved_paths.append(destination)
             try:
@@ -204,6 +242,19 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     @app.get("/healthz")
     async def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/healthz/ready")
+    async def readiness(store: ChromaEmbeddingStore = Depends(get_store)) -> dict[str, str]:
+        try:
+            _ = store.count()
+            return {"status": "ready"}
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"status": "error", "detail": str(exc)}
+
+    @app.delete("/index", status_code=status.HTTP_204_NO_CONTENT)
+    async def reset_index(store: ChromaEmbeddingStore = Depends(get_store)) -> Response:
+        store.reset()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return app
 

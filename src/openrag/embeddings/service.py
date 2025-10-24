@@ -20,8 +20,8 @@ LOGGER = logging.getLogger(__name__)
 class EmbeddingConfig:
     """Configuration for embedding backends."""
 
-    model: str = "Qwen/Qwen2.5-0.5B"
-    dim: int = 1536
+    model: str = "BAAI/bge-small-en-v1.5"
+    dim: int = 384
     use_model: bool = False
     device: str | None = None
     normalize: bool = True
@@ -99,6 +99,13 @@ class QwenEmbeddingBackend:
         if self._client is None:
             return self._delegate.embed_chunks(chunks)
         vectors = self._client.embed_documents([chunk.text for chunk in chunks])
+        # Warn if produced dimension differs from configured dim
+        if vectors and len(vectors[0]) != self._config.dim:
+            LOGGER.warning(
+                "Embedding dim mismatch: configured=%d, actual=%d",
+                self._config.dim,
+                len(vectors[0]),
+            )
         return [
             Embedding(chunk=chunk, vector=self._normalize(tuple(vector)))
             for chunk, vector in zip(chunks, vectors, strict=True)

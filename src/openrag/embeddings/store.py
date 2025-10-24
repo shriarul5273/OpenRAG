@@ -69,6 +69,12 @@ class ChromaEmbeddingStore:
     def reset(self) -> None:
         self._collection.delete(where={})
 
+    def count(self) -> int:
+        try:
+            return int(self._collection.count())
+        except Exception:
+            return 0
+
     def _serialize_chunk(self, chunk: DocumentChunk) -> MutableMapping[str, object]:
         metadata: MutableMapping[str, object] = {
             "document_id": chunk.document_metadata.document_id,

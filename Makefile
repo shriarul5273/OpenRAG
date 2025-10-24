@@ -9,3 +9,18 @@ compose-logs:
 
 compose-smoke:
 	OPENRAG_API_URL=http://localhost:8000 python scripts/compose_smoke.py
+
+lint:
+	ruff check .
+
+typecheck:
+	mypy src tests
+
+test:
+	pytest -q
+
+run-api:
+	uvicorn openrag.api.app:app --reload
+
+run-ui:
+	python -m openrag.ui.app
