@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, MutableMapping, Protocol, Sequence
 
@@ -12,6 +13,8 @@ from chromadb.api.types import Documents, Embeddings as ChromaEmbeddings, IDs, M
 
 from openrag.embeddings.service import EmbeddingBackend
 from openrag.models import DocumentChunk, DocumentMetadata, RetrievedChunk
+
+LOGGER = logging.getLogger(__name__)
 
 
 class EmbeddingStore(Protocol):
@@ -94,12 +97,26 @@ class ChromaEmbeddingStore:
         retrieved: list[RetrievedChunk] = []
         if not ids or not documents or not metadatas:
             return retrieved
-        for idx, doc, metadata, distance in zip(ids, documents, metadatas, distances or [], strict=False):
-            retrieved.append(self._deserialize_chunk(idx, doc, metadata, distance))
-        # Handle cases when distances missing or shorter than ids
-        if len(retrieved) < len(ids):
-            for idx, doc, metadata in zip(ids[len(retrieved) :], documents[len(retrieved) :], metadatas[len(retrieved) :], strict=False):
-                retrieved.append(self._deserialize_chunk(idx, doc, metadata, distance=None))
+        distance_values = list(distances or [])
+        len_distances = len(distance_values)
+
+        len_ids = len(ids)
+        len_docs = len(documents)
+        len_metadatas = len(metadatas)
+        if len_ids != len_docs or len_ids != len_metadatas:
+            LOGGER.warning(
+                "Chroma query returned mismatched result lengths: ids=%d, documents=%d, metadatas=%d",
+                len_ids,
+                len_docs,
+                len_metadatas,
+            )
+
+        common_length = min(len_ids, len_docs, len_metadatas)
+        for index in range(common_length):
+            distance = distance_values[index] if index < len_distances else None
+            retrieved.append(
+                self._deserialize_chunk(ids[index], documents[index], metadatas[index], distance)
+            )
         return retrieved
 
     def _deserialize_chunk(

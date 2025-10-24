@@ -99,6 +99,11 @@ class QwenEmbeddingBackend:
         if self._client is None:
             return self._delegate.embed_chunks(chunks)
         vectors = self._client.embed_documents([chunk.text for chunk in chunks])
+        if len(vectors) != len(chunks):
+            LOGGER.error(
+                "Embedding backend returned %d vectors for %d chunks", len(vectors), len(chunks)
+            )
+            raise ValueError("Mismatch between number of chunks and embedding vectors")
         # Warn if produced dimension differs from configured dim
         if vectors and len(vectors[0]) != self._config.dim:
             LOGGER.warning(
@@ -108,7 +113,7 @@ class QwenEmbeddingBackend:
             )
         return [
             Embedding(chunk=chunk, vector=self._normalize(tuple(vector)))
-            for chunk, vector in zip(chunks, vectors, strict=True)
+            for chunk, vector in zip(chunks, vectors)
         ]
 
     def embed_query(self, query: str) -> Tuple[float, ...]:

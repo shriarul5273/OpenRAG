@@ -83,7 +83,12 @@ def _write_documents(temp_dir: Path, fixtures: Sequence[DocumentFixture]) -> lis
 
 def _map_source_to_fixture(paths: Sequence[Path], fixtures: Sequence[DocumentFixture]) -> dict[str, str]:
     lookup: dict[str, str] = {}
-    for path, fixture in zip(paths, fixtures, strict=True):
+    if len(paths) != len(fixtures):
+        raise ValueError(
+            "Number of document paths does not match number of fixtures: "
+            f"{len(paths)} != {len(fixtures)}"
+        )
+    for path, fixture in zip(paths, fixtures):
         lookup[str(path.resolve())] = fixture.id
     return lookup
 
