@@ -44,9 +44,11 @@ class ChromaEmbeddingStore:
             self._client = chromadb.PersistentClient(path=str(persist_directory))
         else:
             self._client = chromadb.EphemeralClient()
+        self._collection_name = collection_name
+        self._collection_metadata: MutableMapping[str, object] = {"hnsw:space": "cosine"}
         self._collection = self._client.get_or_create_collection(
-            name=collection_name,
-            metadata={"hnsw:space": "cosine"},
+            name=self._collection_name,
+            metadata=dict(self._collection_metadata),
         )
         self._backend = embedding_backend
 
@@ -67,7 +69,14 @@ class ChromaEmbeddingStore:
         return self._deserialize_results(results)
 
     def reset(self) -> None:
-        self._collection.delete(where={})
+        try:
+            self._collection.delete(where={})
+        except ValueError:
+            self._client.delete_collection(name=self._collection_name)
+            self._collection = self._client.get_or_create_collection(
+                name=self._collection_name,
+                metadata=dict(self._collection_metadata),
+            )
 
     def count(self) -> int:
         try:
