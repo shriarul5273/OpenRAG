@@ -91,17 +91,19 @@ class LangChainDocumentIngestor:
         normalized_docs = self._normalize_documents(documents, path)
         split_docs = self._splitter.split_documents(normalized_docs)
         doc_id = uuid5(NAMESPACE_URL, str(path.resolve())).hex
+        display_name = path.name
         document_metadata = DocumentMetadata(
             document_id=doc_id,
             source_path=str(path.resolve()),
             media_type=suffix.lstrip("."),
-            extra={"source": str(path)},
+            extra={"source": str(path), "display_name": display_name},
         )
 
         chunks: List[DocumentChunk] = []
         for order, doc in enumerate(split_docs):
             chunk_metadata: Dict[str, object] = dict(doc.metadata)
             chunk_metadata.setdefault("source", str(path))
+            chunk_metadata.setdefault("display_name", display_name)
             chunk = DocumentChunk(
                 chunk_id=f"{doc_id}-{order}",
                 text=_normalize_text(doc.page_content),

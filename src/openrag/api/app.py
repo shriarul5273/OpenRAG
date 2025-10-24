@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import tempfile
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
@@ -32,7 +32,7 @@ from openrag.ingestion import (
     LangChainDocumentIngestor,
     UnsupportedFileTypeError,
 )
-from openrag.models import DocumentChunk
+from openrag.models import DocumentChunk, DocumentMetadata
 from openrag.retrieval.service import ChromaRetriever, RetrievalConfig, Retriever
 from openrag.metrics.observability import bind_correlation_id, clear_correlation_id, configure_logging
 from openrag.services.generation import GenerationConfig, QwenGenerator, TemplateGenerator
@@ -169,6 +169,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         dataset_id = uuid4().hex
         with tempfile.TemporaryDirectory() as tmpdir:
             saved_paths: list[Path] = []
+            display_names: dict[str, str] = {}
             for upload in files:
                 filename = upload.filename or f"upload-{uuid4().hex}"
                 suffix = Path(filename).suffix.lower()
@@ -178,6 +179,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                     msg = f"Unsupported file type: {suffix or 'unknown'}"
                     raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=msg)
                 destination = Path(tmpdir) / filename
+                resolved_destination = destination.resolve()
                 # Stream copy to avoid loading entire file into memory
                 bytes_written = 0
                 with destination.open("wb") as out_f:
@@ -200,12 +202,15 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                             )
                 await upload.close()
                 saved_paths.append(destination)
+                display_names[str(destination)] = filename
+                display_names[str(resolved_destination)] = filename
             try:
-                chunks = ingestor.ingest(saved_paths)
+                chunks = list(ingestor.ingest(saved_paths))
             except UnsupportedFileTypeError as exc:
                 raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
-        dataset_documents = _build_document_summaries(chunks)
-        store.upsert(chunks)
+        chunks_with_display = _attach_display_names(chunks, display_names)
+        dataset_documents = _build_document_summaries(chunks_with_display)
+        store.upsert(chunks_with_display)
         return DocumentIngestionResponse(dataset_id=dataset_id, documents=dataset_documents)
 
     @app.post("/query", response_model=QueryResponse)
@@ -220,7 +225,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
             CitationModel(
                 chunk_id=citation.chunk.chunk_id,
                 document_id=citation.chunk.document_metadata.document_id,
-                source_path=citation.chunk.document_metadata.source_path,
+                source_path=_resolve_display_name(citation.chunk.document_metadata),
                 media_type=citation.chunk.document_metadata.media_type,
                 score=citation.score,
                 text=citation.chunk.text,
@@ -259,6 +264,63 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     return app
 
 
+def _attach_display_names(
+    chunks: Sequence[DocumentChunk],
+    display_names: Mapping[str, str],
+) -> list[DocumentChunk]:
+    enriched_chunks: list[DocumentChunk] = []
+    for chunk in chunks:
+        extra = dict(chunk.document_metadata.extra)
+        display_name = extra.get("display_name")
+        if display_name:
+            enriched_chunks.append(chunk)
+            continue
+
+        candidate_sources: list[str] = []
+        source = extra.get("source")
+        if isinstance(source, str):
+            candidate_sources.append(source)
+        candidate_sources.append(chunk.document_metadata.source_path)
+
+        resolved_display: str | None = None
+        for candidate in candidate_sources:
+            if not candidate:
+                continue
+            candidate_str = str(candidate)
+            resolved_display = display_names.get(candidate_str)
+            if resolved_display:
+                break
+            resolved_path = Path(candidate_str).resolve(strict=False)
+            resolved_display = display_names.get(str(resolved_path))
+            if resolved_display:
+                break
+
+        if not resolved_display:
+            fallback_source = next((str(c) for c in candidate_sources if c), chunk.document_metadata.source_path)
+            resolved_display = Path(fallback_source).name
+
+        extra["display_name"] = resolved_display
+        chunk_metadata = dict(chunk.chunk_metadata)
+        chunk_metadata.setdefault("display_name", resolved_display)
+        enriched_chunks.append(
+            replace(
+                chunk,
+                document_metadata=replace(chunk.document_metadata, extra=extra),
+                chunk_metadata=chunk_metadata,
+            )
+        )
+    return enriched_chunks
+
+
+def _resolve_display_name(metadata: DocumentMetadata) -> str:
+    extra = metadata.extra or {}
+    display_name = extra.get("display_name")
+    if isinstance(display_name, str) and display_name:
+        return display_name
+    source = extra.get("source") or metadata.source_path
+    return Path(str(source)).name
+
+
 def _build_document_summaries(chunks: Iterable[DocumentChunk]) -> list[DocumentSummary]:
     counts: defaultdict[str, int] = defaultdict(int)
     metadata: dict[str, DocumentChunk] = {}
@@ -272,7 +334,7 @@ def _build_document_summaries(chunks: Iterable[DocumentChunk]) -> list[DocumentS
         summaries.append(
             DocumentSummary(
                 document_id=doc_id,
-                source_path=chunk.document_metadata.source_path,
+                source_path=_resolve_display_name(chunk.document_metadata),
                 media_type=chunk.document_metadata.media_type,
                 chunk_count=count,
             ),
