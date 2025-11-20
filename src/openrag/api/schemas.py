@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DocumentSummary(BaseModel):
@@ -54,6 +54,19 @@ class DatasetStats(BaseModel):
     chunks: int
 
 class IndexStatsResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     collection: str
     total_chunks: int
+    chunks: int | None = Field(
+        default=None,
+        description="Legacy duplicate of total_chunks for clients expecting `chunks`",
+    )
     datasets: List[DatasetStats]
+
+
+class TextIngestionRequest(BaseModel):
+    """Payload for ingesting raw text content."""
+
+    texts: List[str] = Field(..., description="List of raw text snippets to ingest")
+    dataset_id: Optional[str] = Field(default=None)

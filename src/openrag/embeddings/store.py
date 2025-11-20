@@ -20,10 +20,10 @@ class EmbeddingStore(Protocol):
     def upsert(self, chunks: Sequence[DocumentChunk], *, dataset_id: str | None = None) -> Sequence[str]:
         """Persist embeddings for the provided chunks."""
 
-    def similarity_search(self, query: str, *, top_k: int = 5) -> Sequence[RetrievedChunk]:
+    def similarity_search(self, query: str, *, top_k: int = 5, dataset_id: str | None = None) -> Sequence[RetrievedChunk]:
         """Return the top-k similar chunks for the query string."""
 
-    def reset(self) -> None:
+    def reset(self, *, dataset_id: str | None = None) -> None:
         """Remove all stored embeddings."""
 
     def count(self) -> int:
@@ -56,11 +56,14 @@ class ChromaEmbeddingStore:
         )
         self._backend = embedding_backend
 
-    def upsert(self, chunks: Sequence[DocumentChunk]) -> Sequence[str]:
+    def upsert(self, chunks: Sequence[DocumentChunk], *, dataset_id: str | None = None) -> Sequence[str]:
         embeddings = self._backend.embed_chunks(chunks)
         ids: IDs = [embedding.chunk.chunk_id for embedding in embeddings]
         documents: Documents = [embedding.chunk.text for embedding in embeddings]
-        metadatas: Metadatas = [self._serialize_chunk(embedding.chunk, dataset_id=dataset_id) for embedding in embeddings]
+        metadatas: Metadatas = [
+            self._serialize_chunk(embedding.chunk, dataset_id=dataset_id)
+            for embedding in embeddings
+        ]
         vectors: ChromaEmbeddings = [list(embedding.vector) for embedding in embeddings]
         self._collection.upsert(ids=ids, documents=documents, embeddings=vectors, metadatas=metadatas)
         return list(ids)

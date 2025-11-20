@@ -245,7 +245,13 @@ def build_interface(base_url: str | None = None, client: OpenRAGClient | None = 
                     maximum=10,
                     step=1,
                 )
-                dataset_box = gr.Textbox(label="Dataset (optional)", placeholder="default")
+                dataset_box = gr.Dropdown(
+                    label="Dataset (optional)",
+                    choices=["default"],
+                    allow_custom_value=True,
+                    value="default",
+                    interactive=True,
+                )
                 stream_checkbox = gr.Checkbox(label="Stream responses", value=True)
                 api_key_box = gr.Textbox(label="API Key (optional)", type="password")
                 # Wire upload to include dataset
@@ -275,15 +281,20 @@ def build_interface(base_url: str | None = None, client: OpenRAGClient | None = 
             try:
                 stats = api_client.index_stats(api_key=api_key or None)
             except APIError as exc:
-                return f"⚠️ {exc}"
+                return gr.Dropdown.update(), f"⚠️ {exc}"
             lines = [
                 f"Collection: {stats.get('collection')}",
                 f"Total chunks: {stats.get('total_chunks')}",
                 "Datasets:",
             ]
+            choices: list[str] = []
             for item in stats.get("datasets", []):
                 lines.append(f"- {item.get('dataset_id')}: {item.get('chunks')} chunks")
-            return "\n".join(lines)
+                if ds := item.get("dataset_id"):
+                    choices.append(str(ds))
+            if "default" not in choices:
+                choices.append("default")
+            return gr.Dropdown.update(choices=choices, value=(dataset if dataset in choices else "default")), "\n".join(lines)
 
         def _reset_dataset(dataset: str | None, api_key: str | None):
             try:
@@ -293,7 +304,7 @@ def build_interface(base_url: str | None = None, client: OpenRAGClient | None = 
                 return f"⚠️ {exc}"
             return "✅ Reset complete"
 
-        refresh_btn.click(_format_stats, inputs=[api_key_box, dataset_box], outputs=stats_md)
+        refresh_btn.click(_format_stats, inputs=[api_key_box, dataset_box], outputs=[dataset_box, stats_md])
         reset_btn.click(_reset_dataset, inputs=[dataset_box, api_key_box], outputs=stats_md)
 
     return demo

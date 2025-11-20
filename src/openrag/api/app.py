@@ -24,6 +24,7 @@ from openrag.api.schemas import (
     IndexStatsResponse,
     QueryRequest,
     QueryResponse,
+    TextIngestionRequest,
     UrlIngestionRequest,
 )
 from openrag.config import Settings, get_settings
@@ -37,7 +38,7 @@ from openrag.ingestion import (
 )
 from openrag.models import DocumentChunk
 from openrag.retrieval.service import ChromaRetriever, RetrievalConfig, Retriever
-from openrag.metrics.observability import bind_correlation_id, clear_correlation_id, configure_logging
+from openrag.metrics.observability import bind_correlation_id, clear_correlation_id, configure_logging, get_logger
 from openrag.services.generation import GenerationConfig, QwenGenerator, TemplateGenerator
 from openrag.services.query import PromptBuilder, QueryService
 
@@ -89,6 +90,8 @@ def _build_dependencies(settings: Settings) -> AppDependencies:
         RetrievalConfig(
             top_k=settings.max_chunks,
             rerank_lexical=settings.retrieval_rerank_lexical,
+            lexical_blend_weight=settings.retrieval_lexical_blend_weight,
+            max_top_k=settings.retrieval_max_top_k,
             use_cross_encoder=settings.cross_encoder_use,
             cross_encoder_model=settings.cross_encoder_model,
             cross_encoder_top_n=settings.cross_encoder_top_n,
@@ -113,6 +116,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     deps = dependencies or _build_dependencies(settings)
 
     configure_logging()
+    logger = get_logger("api")
     app = FastAPI(title="OpenRAG API", version="0.1.1")
     app.state.dependencies = deps
 
@@ -173,6 +177,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     @app.exception_handler(IngestionError)
     async def handle_ingestion_error(request: Request, exc: IngestionError) -> JSONResponse:
         correlation_id = getattr(request.state, "correlation_id", uuid4().hex)
+        logger.error("ingestion.error", correlation_id=correlation_id, detail=str(exc))
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"detail": str(exc), "correlation_id": correlation_id},
@@ -181,6 +186,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         correlation_id = getattr(request.state, "correlation_id", uuid4().hex)
+        logger.error("unhandled.error", correlation_id=correlation_id, detail=str(exc))
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"detail": "Internal Server Error", "correlation_id": correlation_id},
@@ -217,7 +223,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         total_len = request.headers.get("content-length")
         if total_len and int(total_len) > settings.max_total_upload_mb * 1024 * 1024:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Payload too large")
-        dataset_id = uuid4().hex
+        effective_dataset_id = (dataset_id or "").strip() or settings.default_dataset
         with tempfile.TemporaryDirectory() as tmpdir:
             saved_paths: list[Path] = []
             for upload in files:
@@ -270,14 +276,51 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                 except ImportError:
                     # magic is optional; skip if unavailable
                     pass
+                if bytes_written == 0:
+                    # Empty file; reject to avoid useless ingest
+                    try:
+                        destination.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"File is empty: {filename}",
+                    )
                 saved_paths.append(destination)
             try:
                 chunks = ingestor.ingest(saved_paths)
             except UnsupportedFileTypeError as exc:
                 raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
         dataset_documents = _build_document_summaries(chunks)
-        store.upsert(chunks, dataset_id=dataset_id or settings.default_dataset)
-        return DocumentIngestionResponse(dataset_id=dataset_id or settings.default_dataset, documents=dataset_documents)
+        store.upsert(chunks, dataset_id=effective_dataset_id)
+        return DocumentIngestionResponse(dataset_id=effective_dataset_id, documents=dataset_documents)
+
+    @app.post("/documents/text", response_model=DocumentIngestionResponse, status_code=status.HTTP_201_CREATED)
+    async def ingest_raw_text(
+        payload: TextIngestionRequest,
+        ingestor: DocumentIngestor = Depends(get_ingestor),
+        store: ChromaEmbeddingStore = Depends(get_store),
+        _auth: None = Depends(require_api_key),
+        _rl: None = Depends(rate_limiter),
+    ) -> DocumentIngestionResponse:
+        if not payload.texts:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No text provided")
+        effective_dataset_id = (payload.dataset_id or "").strip() or settings.default_dataset
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths: list[Path] = []
+            for index, text in enumerate(payload.texts):
+                normalized = (text or "").strip()
+                if not normalized:
+                    continue
+                path = Path(tmpdir) / f"text-{index}.txt"
+                path.write_text(normalized, encoding="utf-8")
+                paths.append(path)
+            if not paths:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No non-empty text provided")
+            chunks = ingestor.ingest(paths)
+        dataset_documents = _build_document_summaries(chunks)
+        store.upsert(chunks, dataset_id=effective_dataset_id)
+        return DocumentIngestionResponse(dataset_id=effective_dataset_id, documents=dataset_documents)
 
     @app.post("/query", response_model=QueryResponse)
     async def query_documents(
@@ -362,7 +405,17 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
 
     @app.get("/healthz")
     async def healthcheck() -> dict[str, str]:
-        return {"status": "ok"}
+        from openrag import __version__
+
+        return {"status": "ok", "version": __version__, "environment": settings.environment}
+
+    @app.head("/healthz")
+    async def healthcheck_head() -> Response:
+        return Response(status_code=status.HTTP_200_OK)
+
+    @app.get("/livez")
+    async def liveness() -> dict[str, str]:
+        return {"status": "alive"}
 
     @app.get("/healthz/ready")
     async def readiness(store: ChromaEmbeddingStore = Depends(get_store)) -> dict[str, str]:
@@ -391,7 +444,12 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
 
         for k, v in by_ds.items():
             PipelineMetrics.dataset_chunk_count.labels(dataset_id=k).set(v)
-        return IndexStatsResponse(collection=settings.chroma_collection, total_chunks=total, datasets=datasets)
+        return IndexStatsResponse(
+            collection=settings.chroma_collection,
+            total_chunks=total,
+            chunks=total,
+            datasets=datasets,
+        )
 
     @app.post("/query/stream")
     async def query_stream(
@@ -400,7 +458,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         _auth: None = Depends(require_api_key),
         _rl: None = Depends(rate_limiter),
     ) -> Response:
-        # Generate full answer then stream in small chunks as SSE
+        # Generate full answer then stream in small chunks as SSE with heartbeats
         answer = service.answer(payload.question, top_k=payload.top_k, dataset_id=payload.dataset_id or settings.default_dataset)
         import json as _json
         text = answer.text
@@ -417,10 +475,13 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         ]
 
         def iter_sse():
+            # Initial heartbeat to keep idle proxies open
+            yield ": heartbeat\n\n"
             chunk_size = 128
             for i in range(0, len(text), chunk_size):
                 yield f"data: {text[i:i+chunk_size]}\n\n"
             yield f"event: citations\ndata: {_json.dumps(citations)}\n\n"
+            yield ": heartbeat\n\n"
 
         return Response(iter_sse(), media_type="text/event-stream")
 

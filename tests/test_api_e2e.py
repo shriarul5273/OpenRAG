@@ -26,6 +26,10 @@ def test_health_and_index_flow():
     # Health endpoints
     r = client.get("/healthz")
     assert r.status_code == 200
+    r = client.head("/healthz")
+    assert r.status_code == 200
+    r = client.get("/livez")
+    assert r.status_code == 200
     r = client.get("/healthz/ready")
     assert r.status_code == 200
 
@@ -41,7 +45,9 @@ def test_health_and_index_flow():
     # Stats should report at least 1 chunk
     r = client.get("/index/stats")
     assert r.status_code == 200
-    assert r.json()["chunks"] >= 1
+    stats = r.json()
+    total = stats.get("total_chunks") or stats.get("chunks")
+    assert total is not None and total >= 1
 
     # Query
     payload = {"question": "What is OpenRAG?", "top_k": 3, "dataset_id": "test-ds"}
@@ -50,3 +56,17 @@ def test_health_and_index_flow():
     data = r.json()
     assert data["citations"], "Expected at least one citation"
 
+
+def test_text_ingestion_endpoint():
+    client = make_app()
+    payload = {"texts": ["alpha beta", "gamma"], "dataset_id": "text-ds"}
+    r = client.post("/documents/text", json=payload)
+    assert r.status_code == 201, r.text
+    assert r.json()["dataset_id"] == "text-ds"
+
+    # Should retrieve from text dataset
+    query_payload = {"question": "alpha?", "top_k": 3, "dataset_id": "text-ds"}
+    r = client.post("/query", json=query_payload)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["citations"], "Expected citations from text ingestion"

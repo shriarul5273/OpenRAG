@@ -15,6 +15,8 @@ class RetrievalConfig:
 
     top_k: int = 5
     rerank_lexical: bool = False
+    lexical_blend_weight: float = 0.35
+    max_top_k: int | None = 10
     use_cross_encoder: bool = False
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     cross_encoder_top_n: int = 10
@@ -46,6 +48,9 @@ class ChromaRetriever:
 
     def retrieve(self, query: str, *, top_k: int | None = None, dataset_id: str | None = None) -> Sequence[RetrievedChunk]:
         limit = top_k or self._config.top_k
+        if self._config.max_top_k:
+            limit = min(limit, self._config.max_top_k)
+        limit = max(1, limit)
         items = list(self._store.similarity_search(query, top_k=limit, dataset_id=dataset_id))
         if self._config.use_cross_encoder and self._ce and items:
             # Rerank top-n retrieved items via CrossEncoder
@@ -58,7 +63,14 @@ class ChromaRetriever:
             items = reranked
         elif self._config.rerank_lexical and items:
             tokens = set(query.lower().split())
-            items.sort(key=lambda rc: -_token_overlap_score(tokens, rc.chunk.text))
+            weight = max(0.0, min(1.0, self._config.lexical_blend_weight))
+            scored: list[tuple[RetrievedChunk, float]] = []
+            for rc in items:
+                lexical = _token_overlap_score(tokens, rc.chunk.text)
+                blended = (1.0 - weight) * rc.score + weight * lexical
+                scored.append((rc, blended))
+            scored.sort(key=lambda pair: pair[1], reverse=True)
+            items = [pair[0] for pair in scored]
         return items
 
 

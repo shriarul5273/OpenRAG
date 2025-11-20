@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     tokens_per_chunk: int = 256
     token_overlap: int = 50
     retrieval_rerank_lexical: bool = False
+    retrieval_lexical_blend_weight: float = 0.35
+    retrieval_max_top_k: int = 10
     # Cross-encoder reranker (optional, requires sentence-transformers)
     cross_encoder_use: bool = False
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

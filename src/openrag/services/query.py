@@ -19,6 +19,7 @@ class PromptBuilderConfig:
 
     citation_prefix: str = "["
     citation_suffix: str = "]"
+    use_source_basename: bool = False
 
 
 class PromptBuilder:
@@ -33,8 +34,12 @@ class PromptBuilder:
         lines = []
         for index, citation in enumerate(citations, start=1):
             prefix = f"{self._config.citation_prefix}{index}{self._config.citation_suffix}"
-            source = citation.chunk.document_metadata.source_path
-            lines.append(f"{prefix} {citation.chunk.text}\nSource: {source}")
+            source_path = citation.chunk.document_metadata.source_path
+            if self._config.use_source_basename:
+                from pathlib import Path
+
+                source_path = Path(source_path).name
+            lines.append(f"{prefix} {citation.chunk.text}\nSource: {source_path}")
         return "\n\n".join(lines)
 
 

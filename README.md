@@ -29,7 +29,7 @@ an activated virtual environment.
 
 Copy `.env.example` to `.env` and adjust values as needed to configure Chroma, embeddings, upload size limits, and CORS.
 
-Security: set `OPENRAG_API_KEY` to require `X-API-Key` on protected endpoints. Tune rate limits via `OPENRAG_RATE_LIMIT_REQUESTS` and `OPENRAG_RATE_LIMIT_WINDOW_SECONDS`.
+Security: set `OPENRAG_API_KEY` to require `X-API-Key` on protected endpoints. Tune rate limits via `OPENRAG_RATE_LIMIT_REQUESTS` and `OPENRAG_RATE_LIMIT_WINDOW_SECONDS`. Request headers must send `X-API-Key: <value>`.
 
 ## Repository Layout
 
@@ -135,9 +135,11 @@ Launch the FastAPI app with `uvicorn openrag.api.app:app --reload`. The OpenAPI 
 `POST /documents` and `POST /query` endpoints.
 
 - `/documents`: upload PDF/DOCX/TXT/MD files (multipart) to ingest and index them. Uploads are streamed to disk with configurable file/type/size limits.
+- `/documents/text`: ingest raw text snippets via JSON `{"texts": ["..."], "dataset_id": "optional"}` for quick demos or tests.
 - `/query`: submit a JSON payload `{"question": "...", "top_k": 3}` to receive an answer + citations.
 - `/index` (DELETE): reset the vector index (optionally pass `?dataset_id=...`).
 - `/healthz`, `/healthz/ready`: basic and readiness endpoints.
+- `/livez`: lightweight liveness probe (also `HEAD /healthz` supported).
 
 Extras:
 
@@ -150,6 +152,7 @@ Extras:
 Optional reranking:
 
 - Enable lexical rerank via `OPENRAG_RETRIEVAL_RERANK_LEXICAL=true`.
+- Adjust blend weighting of lexical vs vector scores with `OPENRAG_RETRIEVAL_LEXICAL_BLEND_WEIGHT` (0-1).
 - For cross‑encoder reranking (requires extra install), set `OPENRAG_CROSS_ENCODER_USE=true` and choose a model such as `cross-encoder/ms-marco-MiniLM-L-6-v2`. Install extra:
 
   pip install .[rerank]
