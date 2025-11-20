@@ -23,6 +23,7 @@ services:
       OPENRAG_CHROMA_PORT: "8000"
       OPENRAG_CHROMA_SSL: "false"
       OPENRAG_MAX_CHUNKS: "5"
+      OPENRAG_CROSS_ENCODER_USE: "true"
     ports:
       - "8000:8000"
     depends_on:

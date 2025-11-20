@@ -22,6 +22,7 @@ class DocumentIngestionResponse(BaseModel):
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="End-user question to answer")
     top_k: Optional[int] = Field(default=None, ge=1, le=10, description="Override the number of retrieved chunks")
+    dataset_id: Optional[str] = Field(default=None, description="Optional dataset/namespace to search within")
 
 
 class CitationModel(BaseModel):
@@ -38,3 +39,21 @@ class QueryResponse(BaseModel):
     answer: str
     citations: List[CitationModel]
     latency_ms: float
+
+
+class UrlIngestionRequest(BaseModel):
+    urls: List[str] = Field(..., description="List of URLs to ingest")
+    dataset_id: Optional[str] = Field(default=None)
+
+class IndexStats(BaseModel):
+    collection: str
+    chunks: int
+
+class DatasetStats(BaseModel):
+    dataset_id: str
+    chunks: int
+
+class IndexStatsResponse(BaseModel):
+    collection: str
+    total_chunks: int
+    datasets: List[DatasetStats]

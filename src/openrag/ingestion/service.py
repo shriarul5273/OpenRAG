@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Protocol, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, TextLoader
+from langchain_community.document_loaders import BSHTMLLoader, Docx2txtLoader, PyPDFLoader, TextLoader
 from langchain_community.document_loaders.base import BaseLoader
 from langchain_core.documents import Document as LCDocument
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, TokenTextSplitter
 
 from openrag.metrics.observability import PipelineMetrics, get_logger
 from openrag.models import DocumentChunk, DocumentMetadata
@@ -34,6 +34,9 @@ class IngestionConfig:
     chunk_size: int = 600
     chunk_overlap: int = 100
     encoding: str = "utf-8"
+    use_token_splitter: bool = False
+    tokens_per_chunk: int = 256
+    token_overlap: int = 50
 
 
 class DocumentIngestor(Protocol):
@@ -57,17 +60,26 @@ class LangChainDocumentIngestor:
         ".pdf": PyPDFLoader,
         ".docx": Docx2txtLoader,
         ".txt": TextLoader,
+        ".md": TextLoader,
+        ".html": BSHTMLLoader,
+        ".htm": BSHTMLLoader,
     }
 
     _logger = get_logger("ingestion")
 
     def __init__(self, config: IngestionConfig | None = None) -> None:
         self._config = config or IngestionConfig()
-        self._splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self._config.chunk_size,
-            chunk_overlap=self._config.chunk_overlap,
-            add_start_index=True,
-        )
+        if self._config.use_token_splitter:
+            self._splitter = TokenTextSplitter(
+                chunk_size=self._config.tokens_per_chunk,
+                chunk_overlap=self._config.token_overlap,
+            )
+        else:
+            self._splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self._config.chunk_size,
+                chunk_overlap=self._config.chunk_overlap,
+                add_start_index=True,
+            )
 
     def ingest(self, paths: Sequence[Path]) -> Sequence[DocumentChunk]:
         chunks: List[DocumentChunk] = []

@@ -52,10 +52,10 @@ class QueryService:
         self._prompt_builder = prompt_builder or PromptBuilder()
         self._logger = get_logger("query")
 
-    def answer(self, question: str, *, top_k: int | None = None) -> Answer:
+    def answer(self, question: str, *, top_k: int | None = None, dataset_id: str | None = None) -> Answer:
         start = time.perf_counter()
         retrieval_start = time.perf_counter()
-        retrieved = self._retriever.retrieve(question, top_k=top_k)
+        retrieved = self._retriever.retrieve(question, top_k=top_k, dataset_id=dataset_id)
         retrieval_duration = time.perf_counter() - retrieval_start
         PipelineMetrics.observe_retrieval(
             retrieval_duration,

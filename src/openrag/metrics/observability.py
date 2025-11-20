@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from typing import Iterable, Sequence
 
 import structlog
-from prometheus_client import Histogram
+from prometheus_client import Gauge, Histogram
 
 _logger_configured = False
 _correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="-")
@@ -93,6 +93,11 @@ class PipelineMetrics:
         "openrag_generation_duration_seconds",
         "Time spent generating answers.",
         buckets=(0.05, 0.1, 0.5, 1.0, 2.0, 5.0),
+    )
+    dataset_chunk_count = Gauge(
+        "openrag_dataset_chunk_count",
+        "Number of chunks per dataset.",
+        ["dataset_id"],
     )
 
     @classmethod

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -20,8 +20,11 @@ from openrag.api.schemas import (
     CitationModel,
     DocumentIngestionResponse,
     DocumentSummary,
+    DatasetStats,
+    IndexStatsResponse,
     QueryRequest,
     QueryResponse,
+    UrlIngestionRequest,
 )
 from openrag.config import Settings, get_settings
 from openrag.embeddings import ChromaEmbeddingStore, EmbeddingConfig, QwenEmbeddingBackend
@@ -54,6 +57,9 @@ def _build_dependencies(settings: Settings) -> AppDependencies:
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
         encoding="utf-8",
+        use_token_splitter=settings.use_token_splitter,
+        tokens_per_chunk=settings.tokens_per_chunk,
+        token_overlap=settings.token_overlap,
     )
     ingestor = LangChainDocumentIngestor(config=ingestion_config)
 
@@ -78,7 +84,17 @@ def _build_dependencies(settings: Settings) -> AppDependencies:
         client=chroma_client,
         persist_directory=None if chroma_client else settings.chroma_persist_dir,
     )
-    retriever = ChromaRetriever(store, RetrievalConfig(top_k=settings.max_chunks))
+    retriever = ChromaRetriever(
+        store,
+        RetrievalConfig(
+            top_k=settings.max_chunks,
+            rerank_lexical=settings.retrieval_rerank_lexical,
+            use_cross_encoder=settings.cross_encoder_use,
+            cross_encoder_model=settings.cross_encoder_model,
+            cross_encoder_top_n=settings.cross_encoder_top_n,
+            cross_encoder_device=settings.cross_encoder_device,
+        ),
+    )
     generator = QwenGenerator(
         GenerationConfig(
             model=settings.generator_model,
@@ -122,6 +138,38 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         response.headers["X-Correlation-ID"] = correlation_id
         return response
 
+    # Security dependencies
+    def require_api_key(request: Request) -> None:
+        expected = settings.api_key
+        if not expected:
+            return
+        provided = request.headers.get("X-API-Key")
+        if provided != expected:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+
+    class RateLimiter:
+        def __init__(self, requests: int, window_seconds: int) -> None:
+            self.requests = requests
+            self.window = window_seconds
+            self._buckets: dict[str, list[float]] = {}
+
+        def __call__(self, request: Request) -> None:
+            import time as _t
+
+            client_ip = request.headers.get("x-forwarded-for") or request.client.host
+            key = f"{client_ip}:{request.url.path}"
+            now = _t.time()
+            bucket = self._buckets.setdefault(key, [])
+            # Drop old entries
+            cutoff = now - self.window
+            while bucket and bucket[0] < cutoff:
+                bucket.pop(0)
+            if len(bucket) >= self.requests:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+            bucket.append(now)
+
+    rate_limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window_seconds)
+
     @app.exception_handler(IngestionError)
     async def handle_ingestion_error(request: Request, exc: IngestionError) -> JSONResponse:
         correlation_id = getattr(request.state, "correlation_id", uuid4().hex)
@@ -154,8 +202,11 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     async def upload_documents(
         request: Request,
         files: Sequence[UploadFile] = File(...),
+        dataset_id: str | None = Form(default=None),
         ingestor: DocumentIngestor = Depends(get_ingestor),
         store: ChromaEmbeddingStore = Depends(get_store),
+        _auth: None = Depends(require_api_key),
+        _rl: None = Depends(rate_limiter),
     ) -> DocumentIngestionResponse:
         if not files:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
@@ -199,21 +250,43 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                                 detail=f"File too large (>{settings.max_upload_size_mb}MB): {filename}",
                             )
                 await upload.close()
+                # Optional magic MIME validation
+                try:
+                    import magic  # type: ignore
+
+                    mime = magic.Magic(mime=True)
+                    detected = str(mime.from_file(str(destination)))
+                    allowed_mimes = settings.allowed_mime_map
+                    if suffix in allowed_mimes and detected not in allowed_mimes[suffix]:
+                        # Clean up and reject
+                        try:
+                            destination.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        raise HTTPException(
+                            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                            detail=f"MIME mismatch for {filename}: {detected}",
+                        )
+                except ImportError:
+                    # magic is optional; skip if unavailable
+                    pass
                 saved_paths.append(destination)
             try:
                 chunks = ingestor.ingest(saved_paths)
             except UnsupportedFileTypeError as exc:
                 raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
         dataset_documents = _build_document_summaries(chunks)
-        store.upsert(chunks)
-        return DocumentIngestionResponse(dataset_id=dataset_id, documents=dataset_documents)
+        store.upsert(chunks, dataset_id=dataset_id or settings.default_dataset)
+        return DocumentIngestionResponse(dataset_id=dataset_id or settings.default_dataset, documents=dataset_documents)
 
     @app.post("/query", response_model=QueryResponse)
     async def query_documents(
         payload: QueryRequest,
         service: QueryService = Depends(get_query_service),
+        _auth: None = Depends(require_api_key),
+        _rl: None = Depends(rate_limiter),
     ) -> QueryResponse:
-        answer = service.answer(payload.question, top_k=payload.top_k)
+        answer = service.answer(payload.question, top_k=payload.top_k, dataset_id=payload.dataset_id or settings.default_dataset)
         if not answer.citations:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No relevant documents found")
         citations = [
@@ -234,6 +307,54 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
             latency_ms=answer.latency_ms,
         )
 
+    @app.post("/documents/url", response_model=DocumentIngestionResponse, status_code=status.HTTP_201_CREATED)
+    async def ingest_from_urls(
+        payload: UrlIngestionRequest,
+        request: Request,
+        ingestor: DocumentIngestor = Depends(get_ingestor),
+        store: ChromaEmbeddingStore = Depends(get_store),
+        _auth: None = Depends(require_api_key),
+        _rl: None = Depends(rate_limiter),
+    ) -> DocumentIngestionResponse:
+        if not payload.urls:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No URLs provided")
+        allowed = settings.allowed_ingest_domains
+        allowed_t = allowed if isinstance(allowed, tuple) else tuple([d.strip() for d in allowed.split(',') if d.strip()])
+        import httpx
+        dataset_id = payload.dataset_id or settings.default_dataset
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths: list[Path] = []
+            for url in payload.urls:
+                try:
+                    host = httpx.URL(url).host or ""
+                except Exception:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid URL: {url}")
+                if not allowed_t or host not in allowed_t:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Domain not allowed: {host}")
+                dest = Path(tmpdir) / (Path(url).name or f"download-{uuid4().hex}.bin")
+                size_limit = settings.max_download_size_mb * 1024 * 1024
+                try:
+                    with httpx.stream("GET", url, timeout=30.0, follow_redirects=True) as resp:
+                        if resp.status_code >= 400:
+                            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Download failed: {url}")
+                        bytes_written = 0
+                        with dest.open("wb") as f:
+                            for chunk in resp.iter_bytes():
+                                if chunk:
+                                    f.write(chunk)
+                                    bytes_written += len(chunk)
+                                    if bytes_written > size_limit:
+                                        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=f"Download too large: {url}")
+                except HTTPException:
+                    raise
+                except Exception as exc:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed downloading {url}: {exc}")
+                paths.append(dest)
+            chunks = ingestor.ingest(paths)
+            dataset_documents = _build_document_summaries(chunks)
+            store.upsert(chunks, dataset_id=dataset_id)
+            return DocumentIngestionResponse(dataset_id=dataset_id, documents=dataset_documents)
+
     @app.get("/metrics")
     async def metrics() -> Response:
         payload = generate_latest()
@@ -252,9 +373,56 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
             return {"status": "error", "detail": str(exc)}
 
     @app.delete("/index", status_code=status.HTTP_204_NO_CONTENT)
-    async def reset_index(store: ChromaEmbeddingStore = Depends(get_store)) -> Response:
-        store.reset()
+    async def reset_index(
+        store: ChromaEmbeddingStore = Depends(get_store),
+        dataset_id: str | None = None,
+        _auth: None = Depends(require_api_key),
+    ) -> Response:
+        store.reset(dataset_id=dataset_id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/index/stats", response_model=IndexStatsResponse)
+    async def index_stats(store: ChromaEmbeddingStore = Depends(get_store)) -> IndexStatsResponse:
+        total = store.count()
+        by_ds = store.count_by_dataset()
+        datasets = [DatasetStats(dataset_id=k, chunks=v) for k, v in sorted(by_ds.items())]
+        # Update Prometheus gauge per dataset
+        from openrag.metrics.observability import PipelineMetrics
+
+        for k, v in by_ds.items():
+            PipelineMetrics.dataset_chunk_count.labels(dataset_id=k).set(v)
+        return IndexStatsResponse(collection=settings.chroma_collection, total_chunks=total, datasets=datasets)
+
+    @app.post("/query/stream")
+    async def query_stream(
+        payload: QueryRequest,
+        service: QueryService = Depends(get_query_service),
+        _auth: None = Depends(require_api_key),
+        _rl: None = Depends(rate_limiter),
+    ) -> Response:
+        # Generate full answer then stream in small chunks as SSE
+        answer = service.answer(payload.question, top_k=payload.top_k, dataset_id=payload.dataset_id or settings.default_dataset)
+        import json as _json
+        text = answer.text
+        citations = [
+            {
+                "chunk_id": c.chunk.chunk_id,
+                "document_id": c.chunk.document_metadata.document_id,
+                "source_path": c.chunk.document_metadata.source_path,
+                "media_type": c.chunk.document_metadata.media_type,
+                "score": c.score,
+                "text": c.chunk.text,
+            }
+            for c in answer.citations
+        ]
+
+        def iter_sse():
+            chunk_size = 128
+            for i in range(0, len(text), chunk_size):
+                yield f"data: {text[i:i+chunk_size]}\n\n"
+            yield f"event: citations\ndata: {_json.dumps(citations)}\n\n"
+
+        return Response(iter_sse(), media_type="text/event-stream")
 
     return app
 

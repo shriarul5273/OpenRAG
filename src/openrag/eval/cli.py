@@ -95,6 +95,7 @@ def run_evaluation(
     settings: Settings | None = None,
     json_out: Path | None = None,
     markdown_out: Path | None = None,
+    dataset_id: str | None = None,
 ) -> EvaluationResult:
     settings = settings or get_settings()
     documents, queries = load_dataset(dataset_path)
@@ -118,7 +119,7 @@ def run_evaluation(
 
         chunks = ingestor.ingest(doc_paths)
         store.reset()
-        store.upsert(chunks)
+        store.upsert(chunks, dataset_id=dataset_id or settings.default_dataset)
 
         service = QueryService(
             ChromaRetriever(store, RetrievalConfig(top_k=top_k)),
@@ -132,7 +133,7 @@ def run_evaluation(
         details: list[dict] = []
 
         for query in queries:
-            answer = service.answer(query.question, top_k=top_k)
+            answer = service.answer(query.question, top_k=top_k, dataset_id=dataset_id or settings.default_dataset)
             latencies.append(answer.latency_ms)
             retrieved_ids = [
                 source_lookup.get(chunk.chunk.document_metadata.source_path)
@@ -213,6 +214,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--markdown-out", type=Path, default=None, help="Optional path to write Markdown report")
     parser.add_argument("--min-recall", type=float, default=None, help="Override recall threshold")
     parser.add_argument("--min-mrr", type=float, default=None, help="Override MRR threshold")
+    parser.add_argument("--dataset-id", type=str, default=None, help="Optional dataset namespace to use")
     return parser.parse_args(argv)
 
 
@@ -228,6 +230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings=settings,
         json_out=args.json_out,
         markdown_out=args.markdown_out,
+        dataset_id=args.dataset_id,
     )
     print(json.dumps(result.to_dict(), indent=2))
 

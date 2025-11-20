@@ -29,6 +29,8 @@ an activated virtual environment.
 
 Copy `.env.example` to `.env` and adjust values as needed to configure Chroma, embeddings, upload size limits, and CORS.
 
+Security: set `OPENRAG_API_KEY` to require `X-API-Key` on protected endpoints. Tune rate limits via `OPENRAG_RATE_LIMIT_REQUESTS` and `OPENRAG_RATE_LIMIT_WINDOW_SECONDS`.
+
 ## Repository Layout
 
 ```
@@ -132,10 +134,26 @@ Qwen weights are available. Prompts embed citation markers so UI layers can rend
 Launch the FastAPI app with `uvicorn openrag.api.app:app --reload`. The OpenAPI schema documents the
 `POST /documents` and `POST /query` endpoints.
 
-- `/documents`: upload PDF/DOCX/TXT files (multipart) to ingest and index them. Uploads are streamed to disk with configurable file/type/size limits.
+- `/documents`: upload PDF/DOCX/TXT/MD files (multipart) to ingest and index them. Uploads are streamed to disk with configurable file/type/size limits.
 - `/query`: submit a JSON payload `{"question": "...", "top_k": 3}` to receive an answer + citations.
-- `/index` (DELETE): reset the vector index (demo convenience).
+- `/index` (DELETE): reset the vector index (optionally pass `?dataset_id=...`).
 - `/healthz`, `/healthz/ready`: basic and readiness endpoints.
+
+Extras:
+
+- Streaming: `/query/stream` streams `text/event-stream` chunks (`data: ...`).
+- Remote ingestion: `/documents/url` downloads and ingests URLs (restricted by domain and size).
+- Dataset scoping: include `dataset_id` with uploads (form) and queries (JSON) to isolate corpora; defaults to `OPENRAG_DEFAULT_DATASET` or `default`.
+- Dataset stats: `/index/stats` returns per-dataset chunk counts and total.
+ - Admin UI: the Gradio app includes controls to refresh index stats and reset a dataset.
+
+Optional reranking:
+
+- Enable lexical rerank via `OPENRAG_RETRIEVAL_RERANK_LEXICAL=true`.
+- For cross‑encoder reranking (requires extra install), set `OPENRAG_CROSS_ENCODER_USE=true` and choose a model such as `cross-encoder/ms-marco-MiniLM-L-6-v2`. Install extra:
+
+  pip install .[rerank]
+  docker images build from the provided Dockerfile already include `[rerank]` extras.
 
 Run integration coverage with:
 

@@ -7,14 +7,14 @@ WORKDIR /app
 
 RUN apt-get update \ 
     && apt-get install -y --no-install-recommends build-essential git curl \ 
-       poppler-utils libreoffice pandoc \ 
+       poppler-utils libreoffice pandoc libmagic1 file \ 
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 
 RUN pip install --upgrade pip \ 
-    && pip install .
+    && pip install .[rerank]
 
 EXPOSE 8000
 

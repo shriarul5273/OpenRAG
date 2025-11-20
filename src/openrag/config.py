@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     environment: Literal["dev", "test", "prod"] = "dev"
     data_dir: Path = Path("./data")
 
+    # Dataset / namespace
+    default_dataset: str = "default"
+
     chroma_persist_dir: Path = Path("./.chroma")
     chroma_collection: str = "openrag-default"
     chroma_host: str | None = None
@@ -34,6 +37,15 @@ class Settings(BaseSettings):
     max_chunks: int = 5
     chunk_size: int = 600
     chunk_overlap: int = 100
+    use_token_splitter: bool = False
+    tokens_per_chunk: int = 256
+    token_overlap: int = 50
+    retrieval_rerank_lexical: bool = False
+    # Cross-encoder reranker (optional, requires sentence-transformers)
+    cross_encoder_use: bool = False
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    cross_encoder_top_n: int = 10
+    cross_encoder_device: str | None = None
 
     use_model_embeddings: bool = False
     use_model_generator: bool = False
@@ -42,7 +54,7 @@ class Settings(BaseSettings):
     evaluation_min_mrr: float = 0.5
 
     # API & upload safety
-    allowed_extensions: tuple[str, ...] | str = (".pdf", ".docx", ".txt")
+    allowed_extensions: tuple[str, ...] | str = (".pdf", ".docx", ".txt", ".md")
     max_files: int = 12
     max_upload_size_mb: int = 25  # per file
     max_total_upload_mb: int = 100
@@ -52,6 +64,18 @@ class Settings(BaseSettings):
     cors_allow_credentials: bool = False
     cors_allow_methods: tuple[str, ...] = ("GET", "POST", "DELETE", "OPTIONS")
     cors_allow_headers: tuple[str, ...] = ("*",)
+
+    # Security
+    api_key: str | None = None  # if set, required in X-API-Key header
+    rate_limit_requests: int = 120  # per window per client
+    rate_limit_window_seconds: int = 60
+
+    # Remote ingestion
+    allowed_ingest_domains: tuple[str, ...] | str = ()  # empty means block external URLs by default
+    max_download_size_mb: int = 25
+
+    # MIME allowlist (JSON mapping from extension to list of allowed mime types)
+    allowed_mime_json: str | None = None
 
     @property
     def is_test(self) -> bool:
@@ -66,6 +90,30 @@ class Settings(BaseSettings):
             parts = [p.strip() for p in value.split(",") if p.strip()]
             return tuple(parts) if parts else (".pdf", ".docx", ".txt")
         return (".pdf", ".docx", ".txt")
+
+    @property
+    def allowed_mime_map(self) -> dict[str, set[str]]:
+        default: dict[str, set[str]] = {
+            ".pdf": {"application/pdf"},
+            ".txt": {"text/plain", "application/octet-stream"},
+            ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            ".md": {"text/markdown", "text/plain", "application/octet-stream"},
+        }
+        if not self.allowed_mime_json:
+            return default
+        try:
+            import json
+
+            parsed = json.loads(self.allowed_mime_json)
+            if not isinstance(parsed, dict):
+                return default
+            mapped: dict[str, set[str]] = {}
+            for k, v in parsed.items():
+                if isinstance(k, str) and isinstance(v, (list, tuple)):
+                    mapped[k] = {str(x) for x in v}
+            return mapped or default
+        except Exception:
+            return default
 
 
 @lru_cache(maxsize=1)

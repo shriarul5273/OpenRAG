@@ -17,7 +17,7 @@ from openrag.models import DocumentChunk, DocumentMetadata, RetrievedChunk
 class EmbeddingStore(Protocol):
     """Protocol for embedding persistence backends."""
 
-    def upsert(self, chunks: Sequence[DocumentChunk]) -> Sequence[str]:
+    def upsert(self, chunks: Sequence[DocumentChunk], *, dataset_id: str | None = None) -> Sequence[str]:
         """Persist embeddings for the provided chunks."""
 
     def similarity_search(self, query: str, *, top_k: int = 5) -> Sequence[RetrievedChunk]:
@@ -25,6 +25,12 @@ class EmbeddingStore(Protocol):
 
     def reset(self) -> None:
         """Remove all stored embeddings."""
+
+    def count(self) -> int:
+        """Return total number of stored chunks."""
+
+    def count_by_dataset(self) -> Mapping[str, int]:
+        """Return a mapping of dataset_id to chunk count."""
 
 
 class ChromaEmbeddingStore:
@@ -54,20 +60,24 @@ class ChromaEmbeddingStore:
         embeddings = self._backend.embed_chunks(chunks)
         ids: IDs = [embedding.chunk.chunk_id for embedding in embeddings]
         documents: Documents = [embedding.chunk.text for embedding in embeddings]
-        metadatas: Metadatas = [self._serialize_chunk(embedding.chunk) for embedding in embeddings]
+        metadatas: Metadatas = [self._serialize_chunk(embedding.chunk, dataset_id=dataset_id) for embedding in embeddings]
         vectors: ChromaEmbeddings = [list(embedding.vector) for embedding in embeddings]
         self._collection.upsert(ids=ids, documents=documents, embeddings=vectors, metadatas=metadatas)
         return list(ids)
 
-    def similarity_search(self, query: str, *, top_k: int = 5) -> Sequence[RetrievedChunk]:
+    def similarity_search(self, query: str, *, top_k: int = 5, dataset_id: str | None = None) -> Sequence[RetrievedChunk]:
         if top_k <= 0:
             return []
         vector = list(self._backend.embed_query(query))
-        results = self._collection.query(query_embeddings=[vector], n_results=top_k)
+        where = {"dataset_id": dataset_id} if dataset_id else None
+        results = self._collection.query(query_embeddings=[vector], n_results=top_k, where=where)
         return self._deserialize_results(results)
 
-    def reset(self) -> None:
-        self._collection.delete(where={})
+    def reset(self, *, dataset_id: str | None = None) -> None:
+        if dataset_id:
+            self._collection.delete(where={"dataset_id": dataset_id})
+        else:
+            self._collection.delete(where={})
 
     def count(self) -> int:
         try:
@@ -75,7 +85,35 @@ class ChromaEmbeddingStore:
         except Exception:
             return 0
 
-    def _serialize_chunk(self, chunk: DocumentChunk) -> MutableMapping[str, object]:
+    def count_by_dataset(self) -> Mapping[str, int]:
+        counts: dict[str, int] = {}
+        try:
+            # paginate through metadatas only
+            limit = 1000
+            offset = 0
+            while True:
+                batch = self._collection.get(
+                    include=["metadatas"],
+                    limit=limit,
+                    offset=offset,
+                )
+                metadatas = batch.get("metadatas") or []
+                if not metadatas:
+                    break
+                for md in metadatas:
+                    if not isinstance(md, dict):
+                        continue
+                    ds = str(md.get("dataset_id", "")) or "default"
+                    counts[ds] = counts.get(ds, 0) + 1
+                # if fewer than limit, last page
+                if isinstance(metadatas, list) and len(metadatas) < limit:
+                    break
+                offset += limit
+        except Exception:
+            pass
+        return counts
+
+    def _serialize_chunk(self, chunk: DocumentChunk, *, dataset_id: str | None = None) -> MutableMapping[str, object]:
         metadata: MutableMapping[str, object] = {
             "document_id": chunk.document_metadata.document_id,
             "source_path": chunk.document_metadata.source_path,
@@ -84,6 +122,8 @@ class ChromaEmbeddingStore:
             "doc_extra": self._dumps(chunk.document_metadata.extra),
             "chunk_metadata": self._dumps(chunk.chunk_metadata),
         }
+        if dataset_id:
+            metadata["dataset_id"] = dataset_id
         return metadata
 
     def _deserialize_results(self, results: Mapping[str, object]) -> Sequence[RetrievedChunk]:
