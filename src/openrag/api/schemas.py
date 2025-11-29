@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from openrag.config import get_settings
 
 
 class DocumentSummary(BaseModel):
@@ -21,8 +23,33 @@ class DocumentIngestionResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="End-user question to answer")
-    top_k: Optional[int] = Field(default=None, ge=1, le=10, description="Override the number of retrieved chunks")
+    top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=get_settings().retrieval_max_top_k,
+        description="Override the number of retrieved chunks",
+    )
     dataset_id: Optional[str] = Field(default=None, description="Optional dataset/namespace to search within")
+    rerank: Optional[Literal["none", "lexical", "cross_encoder"]] = Field(
+        default=None,
+        description="Override reranker strategy for this query",
+    )
+    lexical_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Blend weight for lexical reranker (0-1)",
+    )
+    cross_encoder_top_n: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Override top-n passed to cross-encoder reranker",
+    )
+    access_labels: Optional[List[str]] = Field(
+        default=None,
+        min_length=1,
+        description="Restrict results to chunks tagged with one of these access labels",
+    )
 
 
 class CitationModel(BaseModel):
@@ -32,6 +59,7 @@ class CitationModel(BaseModel):
     media_type: str
     score: float
     text: str
+    access_label: Optional[str] = None
 
 
 class QueryResponse(BaseModel):
@@ -39,11 +67,15 @@ class QueryResponse(BaseModel):
     answer: str
     citations: List[CitationModel]
     latency_ms: float
+    retrieval_ms: Optional[float] = None
+    generation_ms: Optional[float] = None
+    trace_id: Optional[str] = None
 
 
 class UrlIngestionRequest(BaseModel):
     urls: List[str] = Field(..., description="List of URLs to ingest")
     dataset_id: Optional[str] = Field(default=None)
+    access_label: Optional[str] = Field(default=None, description="Access label to apply to ingested URLs")
 
 class IndexStats(BaseModel):
     collection: str
@@ -70,3 +102,4 @@ class TextIngestionRequest(BaseModel):
 
     texts: List[str] = Field(..., description="List of raw text snippets to ingest")
     dataset_id: Optional[str] = Field(default=None)
+    access_label: Optional[str] = Field(default=None, description="Access label to apply to ingested texts")

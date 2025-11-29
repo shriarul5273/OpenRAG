@@ -45,6 +45,44 @@ from openrag.services.query import PromptBuilder, QueryService
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 
+def _coerce_int(value: object, default: int | None = None) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value: object, default: float | None = None) -> float | None:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_bool(value: object, default: bool | None = None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _coerce_list(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple, set)):
+        values = [str(v).strip() for v in value if str(v).strip()]
+        return values or None
+    if isinstance(value, str):
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        return parts or None
+    return None
+
+
 @dataclass(frozen=True)
 class AppDependencies:
     ingestor: DocumentIngestor
@@ -204,11 +242,49 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
     def get_query_service(dep: AppDependencies = Depends(get_dependencies)) -> QueryService:
         return dep.query_service
 
+    def _ingestor_for_dataset(dataset_id: str | None, base: DocumentIngestor) -> DocumentIngestor:
+        cfg = settings.dataset_config_for(dataset_id)
+        if not cfg:
+            return base
+        use_token_splitter = _coerce_bool(cfg.get("use_token_splitter"), settings.use_token_splitter)
+        return LangChainDocumentIngestor(
+            config=IngestionConfig(
+                chunk_size=_coerce_int(cfg.get("chunk_size"), settings.chunk_size) or settings.chunk_size,
+                chunk_overlap=_coerce_int(cfg.get("chunk_overlap"), settings.chunk_overlap) or settings.chunk_overlap,
+                encoding="utf-8",
+                use_token_splitter=use_token_splitter if use_token_splitter is not None else settings.use_token_splitter,
+                tokens_per_chunk=_coerce_int(cfg.get("tokens_per_chunk"), settings.tokens_per_chunk)
+                or settings.tokens_per_chunk,
+                token_overlap=_coerce_int(cfg.get("token_overlap"), settings.token_overlap) or settings.token_overlap,
+            ),
+        )
+
+    def _retrieval_overrides(dataset_id: str | None) -> dict[str, object]:
+        cfg = settings.dataset_config_for(dataset_id)
+        rerank = cfg.get("rerank")
+        rerank = rerank if isinstance(rerank, str) and rerank in {"none", "lexical", "cross_encoder"} else None
+        return {
+            "default_top_k": _coerce_int(cfg.get("retrieval_top_k"), None),
+            "max_top_k": _coerce_int(cfg.get("retrieval_max_top_k"), settings.retrieval_max_top_k),
+            "rerank": rerank,
+            "lexical_weight": _coerce_float(cfg.get("lexical_blend_weight"), None),
+            "cross_encoder_top_n": _coerce_int(cfg.get("cross_encoder_top_n"), None),
+            "access_labels": _coerce_list(cfg.get("access_labels")),
+        }
+
+    def _effective_access_label(requested: str | None, dataset_cfg: dict[str, object]) -> str | None:
+        candidate = (requested or "").strip()
+        if candidate:
+            return candidate
+        fallback = dataset_cfg.get("access_label") or dataset_cfg.get("default_access_label")
+        return str(fallback).strip() if fallback else None
+
     @app.post("/documents", response_model=DocumentIngestionResponse, status_code=status.HTTP_201_CREATED)
     async def upload_documents(
         request: Request,
         files: Sequence[UploadFile] = File(...),
         dataset_id: str | None = Form(default=None),
+        access_label: str | None = Form(default=None),
         ingestor: DocumentIngestor = Depends(get_ingestor),
         store: ChromaEmbeddingStore = Depends(get_store),
         _auth: None = Depends(require_api_key),
@@ -224,6 +300,9 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         if total_len and int(total_len) > settings.max_total_upload_mb * 1024 * 1024:
             raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Payload too large")
         effective_dataset_id = (dataset_id or "").strip() or settings.default_dataset
+        dataset_cfg = settings.dataset_config_for(effective_dataset_id)
+        effective_access_label = _effective_access_label(access_label, dataset_cfg)
+        ingestor_for_dataset = _ingestor_for_dataset(effective_dataset_id, ingestor)
         with tempfile.TemporaryDirectory() as tmpdir:
             saved_paths: list[Path] = []
             for upload in files:
@@ -288,7 +367,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                     )
                 saved_paths.append(destination)
             try:
-                chunks = ingestor.ingest(saved_paths)
+                chunks = ingestor_for_dataset.ingest(saved_paths, access_label=effective_access_label)
             except UnsupportedFileTypeError as exc:
                 raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
         dataset_documents = _build_document_summaries(chunks)
@@ -306,6 +385,9 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         if not payload.texts:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No text provided")
         effective_dataset_id = (payload.dataset_id or "").strip() or settings.default_dataset
+        dataset_cfg = settings.dataset_config_for(effective_dataset_id)
+        effective_access_label = _effective_access_label(payload.access_label, dataset_cfg)
+        ingestor_for_dataset = _ingestor_for_dataset(effective_dataset_id, ingestor)
         with tempfile.TemporaryDirectory() as tmpdir:
             paths: list[Path] = []
             for index, text in enumerate(payload.texts):
@@ -317,7 +399,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                 paths.append(path)
             if not paths:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No non-empty text provided")
-            chunks = ingestor.ingest(paths)
+            chunks = ingestor_for_dataset.ingest(paths, access_label=effective_access_label)
         dataset_documents = _build_document_summaries(chunks)
         store.upsert(chunks, dataset_id=effective_dataset_id)
         return DocumentIngestionResponse(dataset_id=effective_dataset_id, documents=dataset_documents)
@@ -329,7 +411,23 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         _auth: None = Depends(require_api_key),
         _rl: None = Depends(rate_limiter),
     ) -> QueryResponse:
-        answer = service.answer(payload.question, top_k=payload.top_k, dataset_id=payload.dataset_id or settings.default_dataset)
+        dataset_id = (payload.dataset_id or "").strip() or settings.default_dataset
+        retrieval_cfg = _retrieval_overrides(dataset_id)
+        effective_top_k = payload.top_k or retrieval_cfg["default_top_k"]
+        effective_access_labels = payload.access_labels or retrieval_cfg["access_labels"]
+        rerank_mode = payload.rerank or retrieval_cfg["rerank"]
+        lexical_weight = payload.lexical_weight if payload.lexical_weight is not None else retrieval_cfg["lexical_weight"]
+        cross_encoder_top_n = payload.cross_encoder_top_n or retrieval_cfg["cross_encoder_top_n"]
+        answer = service.answer(
+            payload.question,
+            top_k=effective_top_k,
+            dataset_id=dataset_id,
+            rerank=rerank_mode,  # type: ignore[arg-type]
+            lexical_weight=lexical_weight if lexical_weight is None else float(lexical_weight),
+            cross_encoder_top_n=cross_encoder_top_n,
+            access_labels=effective_access_labels,
+            max_top_k=retrieval_cfg["max_top_k"],
+        )
         if not answer.citations:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No relevant documents found")
         citations = [
@@ -340,6 +438,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                 media_type=citation.chunk.document_metadata.media_type,
                 score=citation.score,
                 text=citation.chunk.text,
+                access_label=citation.chunk.document_metadata.access_label,
             )
             for citation in answer.citations
         ]
@@ -348,6 +447,9 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
             answer=answer.text,
             citations=citations,
             latency_ms=answer.latency_ms,
+            retrieval_ms=answer.retrieval_ms,
+            generation_ms=answer.generation_ms,
+            trace_id=answer.trace_id,
         )
 
     @app.post("/documents/url", response_model=DocumentIngestionResponse, status_code=status.HTTP_201_CREATED)
@@ -365,6 +467,9 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         allowed_t = allowed if isinstance(allowed, tuple) else tuple([d.strip() for d in allowed.split(',') if d.strip()])
         import httpx
         dataset_id = payload.dataset_id or settings.default_dataset
+        dataset_cfg = settings.dataset_config_for(dataset_id)
+        effective_access_label = _effective_access_label(payload.access_label, dataset_cfg)
+        ingestor_for_dataset = _ingestor_for_dataset(dataset_id, ingestor)
         with tempfile.TemporaryDirectory() as tmpdir:
             paths: list[Path] = []
             for url in payload.urls:
@@ -393,7 +498,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                 except Exception as exc:
                     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed downloading {url}: {exc}")
                 paths.append(dest)
-            chunks = ingestor.ingest(paths)
+            chunks = ingestor_for_dataset.ingest(paths, access_label=effective_access_label)
             dataset_documents = _build_document_summaries(chunks)
             store.upsert(chunks, dataset_id=dataset_id)
             return DocumentIngestionResponse(dataset_id=dataset_id, documents=dataset_documents)
@@ -459,7 +564,23 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
         _rl: None = Depends(rate_limiter),
     ) -> Response:
         # Generate full answer then stream in small chunks as SSE with heartbeats
-        answer = service.answer(payload.question, top_k=payload.top_k, dataset_id=payload.dataset_id or settings.default_dataset)
+        dataset_id = (payload.dataset_id or "").strip() or settings.default_dataset
+        retrieval_cfg = _retrieval_overrides(dataset_id)
+        effective_top_k = payload.top_k or retrieval_cfg["default_top_k"]
+        effective_access_labels = payload.access_labels or retrieval_cfg["access_labels"]
+        rerank_mode = payload.rerank or retrieval_cfg["rerank"]
+        lexical_weight = payload.lexical_weight if payload.lexical_weight is not None else retrieval_cfg["lexical_weight"]
+        cross_encoder_top_n = payload.cross_encoder_top_n or retrieval_cfg["cross_encoder_top_n"]
+        answer = service.answer(
+            payload.question,
+            top_k=effective_top_k,
+            dataset_id=dataset_id,
+            rerank=rerank_mode,  # type: ignore[arg-type]
+            lexical_weight=lexical_weight if lexical_weight is None else float(lexical_weight),
+            cross_encoder_top_n=cross_encoder_top_n,
+            access_labels=effective_access_labels,
+            max_top_k=retrieval_cfg["max_top_k"],
+        )
         import json as _json
         text = answer.text
         citations = [
@@ -470,6 +591,7 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
                 "media_type": c.chunk.document_metadata.media_type,
                 "score": c.score,
                 "text": c.chunk.text,
+                "access_label": c.chunk.document_metadata.access_label,
             }
             for c in answer.citations
         ]
@@ -479,8 +601,9 @@ def create_app(*, settings: Settings | None = None, dependencies: AppDependencie
             yield ": heartbeat\n\n"
             chunk_size = 128
             for i in range(0, len(text), chunk_size):
-                yield f"data: {text[i:i+chunk_size]}\n\n"
+            yield f"data: {text[i:i+chunk_size]}\n\n"
             yield f"event: citations\ndata: {_json.dumps(citations)}\n\n"
+            yield f"event: meta\ndata: {_json.dumps({'trace_id': answer.trace_id, 'retrieval_ms': answer.retrieval_ms, 'generation_ms': answer.generation_ms, 'latency_ms': answer.latency_ms})}\n\n"
             yield ": heartbeat\n\n"
 
         return Response(iter_sse(), media_type="text/event-stream")

@@ -15,6 +15,7 @@ class DocumentMetadata:
     source_path: str
     media_type: str
     created_at: datetime = field(default_factory=datetime.utcnow)
+    access_label: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -45,3 +46,6 @@ class Answer:
     citations: Sequence[RetrievedChunk]
     query_id: str
     latency_ms: float
+    retrieval_ms: float | None = None
+    generation_ms: float | None = None
+    trace_id: str | None = None

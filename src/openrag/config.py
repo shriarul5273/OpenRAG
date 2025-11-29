@@ -78,6 +78,7 @@ class Settings(BaseSettings):
 
     # MIME allowlist (JSON mapping from extension to list of allowed mime types)
     allowed_mime_json: str | None = None
+    dataset_configs: dict[str, dict[str, object]] = {}
 
     @property
     def is_test(self) -> bool:
@@ -116,6 +117,11 @@ class Settings(BaseSettings):
             return mapped or default
         except Exception:
             return default
+
+    def dataset_config_for(self, dataset_id: str | None) -> dict[str, object]:
+        if not dataset_id:
+            return {}
+        return self.dataset_configs.get(dataset_id, {})
 
 
 @lru_cache(maxsize=1)

@@ -84,13 +84,23 @@ class OpenRAGClient:
     def __post_init__(self) -> None:
         self._client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
 
-    def upload_documents(self, paths: Sequence[Path], *, dataset_id: str | None = None, api_key: str | None = None) -> DocumentIngestionResponse:
+    def upload_documents(
+        self,
+        paths: Sequence[Path],
+        *,
+        dataset_id: str | None = None,
+        access_label: str | None = None,
+        api_key: str | None = None,
+    ) -> DocumentIngestionResponse:
         files: list[tuple[str, tuple[str, bytes, str]]] = []
         for path in paths:
             mime, _ = mimetypes.guess_type(path.name)
             data = path.read_bytes()
             files.append(("files", (path.name, data, mime or "application/octet-stream")))
-        data = {"dataset_id": dataset_id} if dataset_id else None
+        data: dict[str, object] | None = {"dataset_id": dataset_id} if dataset_id else {}
+        if access_label:
+            data = data or {}
+            data["access_label"] = access_label
         headers = {"X-API-Key": api_key} if api_key else None
         response = self._client.post("/documents", files=files, data=data, headers=headers)
         if response.status_code >= 400:
@@ -98,12 +108,31 @@ class OpenRAGClient:
             raise APIError(f"Upload failed ({response.status_code}) [cid={cid}]: {response.text}")
         return DocumentIngestionResponse.model_validate(response.json())
 
-    def query(self, question: str, top_k: int | None = None, *, dataset_id: str | None = None, api_key: str | None = None) -> QueryResponse:
+    def query(
+        self,
+        question: str,
+        top_k: int | None = None,
+        *,
+        dataset_id: str | None = None,
+        rerank: str | None = None,
+        lexical_weight: float | None = None,
+        cross_encoder_top_n: int | None = None,
+        access_labels: Sequence[str] | None = None,
+        api_key: str | None = None,
+    ) -> QueryResponse:
         payload = {"question": question}
         if top_k:
             payload["top_k"] = top_k
         if dataset_id:
             payload["dataset_id"] = dataset_id
+        if rerank:
+            payload["rerank"] = rerank
+        if lexical_weight is not None:
+            payload["lexical_weight"] = lexical_weight
+        if cross_encoder_top_n:
+            payload["cross_encoder_top_n"] = cross_encoder_top_n
+        if access_labels:
+            payload["access_labels"] = list(access_labels)
         headers = {"X-API-Key": api_key} if api_key else None
         response = self._client.post("/query", json=payload, headers=headers)
         if response.status_code == 404:
@@ -114,12 +143,31 @@ class OpenRAGClient:
             raise APIError(f"Query failed ({response.status_code}) [cid={cid}]: {response.text}")
         return QueryResponse.model_validate(response.json())
 
-    def stream_query(self, question: str, top_k: int | None = None, *, dataset_id: str | None = None, api_key: str | None = None):
+    def stream_query(
+        self,
+        question: str,
+        top_k: int | None = None,
+        *,
+        dataset_id: str | None = None,
+        rerank: str | None = None,
+        lexical_weight: float | None = None,
+        cross_encoder_top_n: int | None = None,
+        access_labels: Sequence[str] | None = None,
+        api_key: str | None = None,
+    ):
         payload: dict[str, object] = {"question": question}
         if top_k:
             payload["top_k"] = top_k
         if dataset_id:
             payload["dataset_id"] = dataset_id
+        if rerank:
+            payload["rerank"] = rerank
+        if lexical_weight is not None:
+            payload["lexical_weight"] = lexical_weight
+        if cross_encoder_top_n:
+            payload["cross_encoder_top_n"] = cross_encoder_top_n
+        if access_labels:
+            payload["access_labels"] = list(access_labels)
         headers = {"Accept": "text/event-stream"}
         if api_key:
             headers["X-API-Key"] = api_key

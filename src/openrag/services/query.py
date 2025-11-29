@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Literal, Sequence
 from uuid import NAMESPACE_URL, uuid5
 
-from openrag.metrics.observability import PipelineMetrics, get_logger
+from openrag.metrics.observability import PipelineMetrics, get_correlation_id, get_logger
 from openrag.models import Answer, RetrievedChunk
 from openrag.retrieval.service import Retriever
 from openrag.services.generation import GenerationBackend, TemplateGenerator
@@ -57,10 +57,30 @@ class QueryService:
         self._prompt_builder = prompt_builder or PromptBuilder()
         self._logger = get_logger("query")
 
-    def answer(self, question: str, *, top_k: int | None = None, dataset_id: str | None = None) -> Answer:
+    def answer(
+        self,
+        question: str,
+        *,
+        top_k: int | None = None,
+        dataset_id: str | None = None,
+        rerank: Literal["none", "lexical", "cross_encoder"] | None = None,
+        lexical_weight: float | None = None,
+        cross_encoder_top_n: int | None = None,
+        access_labels: Sequence[str] | None = None,
+        max_top_k: int | None = None,
+    ) -> Answer:
         start = time.perf_counter()
         retrieval_start = time.perf_counter()
-        retrieved = self._retriever.retrieve(question, top_k=top_k, dataset_id=dataset_id)
+        retrieved = self._retriever.retrieve(
+            question,
+            top_k=top_k,
+            dataset_id=dataset_id,
+            rerank=rerank,
+            lexical_weight=lexical_weight,
+            cross_encoder_top_n=cross_encoder_top_n,
+            access_labels=access_labels,
+            max_top_k=max_top_k,
+        )
         retrieval_duration = time.perf_counter() - retrieval_start
         PipelineMetrics.observe_retrieval(
             retrieval_duration,
@@ -88,7 +108,15 @@ class QueryService:
         )
         latency_ms = (time.perf_counter() - start) * 1000
         query_id = uuid5(NAMESPACE_URL, question).hex
-        return Answer(text=text, citations=deduped, query_id=query_id, latency_ms=latency_ms)
+        return Answer(
+            text=text,
+            citations=deduped,
+            query_id=query_id,
+            latency_ms=latency_ms,
+            retrieval_ms=retrieval_duration * 1000,
+            generation_ms=generation_duration * 1000,
+            trace_id=get_correlation_id(),
+        )
 
     @staticmethod
     def _dedupe_citations(citations: Sequence[RetrievedChunk]) -> Sequence[RetrievedChunk]:

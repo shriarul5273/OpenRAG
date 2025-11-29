@@ -20,7 +20,14 @@ class EmbeddingStore(Protocol):
     def upsert(self, chunks: Sequence[DocumentChunk], *, dataset_id: str | None = None) -> Sequence[str]:
         """Persist embeddings for the provided chunks."""
 
-    def similarity_search(self, query: str, *, top_k: int = 5, dataset_id: str | None = None) -> Sequence[RetrievedChunk]:
+    def similarity_search(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        dataset_id: str | None = None,
+        access_labels: Sequence[str] | None = None,
+    ) -> Sequence[RetrievedChunk]:
         """Return the top-k similar chunks for the query string."""
 
     def reset(self, *, dataset_id: str | None = None) -> None:
@@ -68,12 +75,24 @@ class ChromaEmbeddingStore:
         self._collection.upsert(ids=ids, documents=documents, embeddings=vectors, metadatas=metadatas)
         return list(ids)
 
-    def similarity_search(self, query: str, *, top_k: int = 5, dataset_id: str | None = None) -> Sequence[RetrievedChunk]:
+    def similarity_search(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        dataset_id: str | None = None,
+        access_labels: Sequence[str] | None = None,
+    ) -> Sequence[RetrievedChunk]:
         if top_k <= 0:
             return []
         vector = list(self._backend.embed_query(query))
-        where = {"dataset_id": dataset_id} if dataset_id else None
-        results = self._collection.query(query_embeddings=[vector], n_results=top_k, where=where)
+        where: dict[str, object] = {}
+        if dataset_id:
+            where["dataset_id"] = dataset_id
+        if access_labels:
+            where["access_label"] = {"$in": list(access_labels)}
+        where_filter = where or None
+        results = self._collection.query(query_embeddings=[vector], n_results=top_k, where=where_filter)
         return self._deserialize_results(results)
 
     def reset(self, *, dataset_id: str | None = None) -> None:
@@ -127,6 +146,8 @@ class ChromaEmbeddingStore:
         }
         if dataset_id:
             metadata["dataset_id"] = dataset_id
+        if chunk.document_metadata.access_label:
+            metadata["access_label"] = chunk.document_metadata.access_label
         return metadata
 
     def _deserialize_results(self, results: Mapping[str, object]) -> Sequence[RetrievedChunk]:
@@ -156,6 +177,7 @@ class ChromaEmbeddingStore:
             document_id=str(metadata.get("document_id", "")),
             source_path=str(metadata.get("source_path", "")),
             media_type=str(metadata.get("media_type", "")),
+            access_label=str(metadata.get("access_label")) if metadata.get("access_label") else None,
             extra=self._loads_dict(metadata.get("doc_extra")),
         )
         chunk = DocumentChunk(

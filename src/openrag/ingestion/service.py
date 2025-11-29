@@ -42,7 +42,7 @@ class IngestionConfig:
 class DocumentIngestor(Protocol):
     """Protocol for ingestion implementations."""
 
-    def ingest(self, paths: Sequence[Path]) -> Sequence[DocumentChunk]:
+    def ingest(self, paths: Sequence[Path], *, access_label: str | None = None) -> Sequence[DocumentChunk]:
         """Ingest the given document paths into normalized chunks."""
 
 
@@ -81,13 +81,13 @@ class LangChainDocumentIngestor:
                 add_start_index=True,
             )
 
-    def ingest(self, paths: Sequence[Path]) -> Sequence[DocumentChunk]:
+    def ingest(self, paths: Sequence[Path], *, access_label: str | None = None) -> Sequence[DocumentChunk]:
         chunks: List[DocumentChunk] = []
         for path in paths:
-            chunks.extend(self._ingest_single(path))
+            chunks.extend(self._ingest_single(path, access_label=access_label))
         return chunks
 
-    def _ingest_single(self, path: Path) -> Sequence[DocumentChunk]:
+    def _ingest_single(self, path: Path, *, access_label: str | None = None) -> Sequence[DocumentChunk]:
         suffix = path.suffix.lower()
         loader_cls = self._LOADERS.get(suffix)
         if loader_cls is None:
@@ -107,7 +107,8 @@ class LangChainDocumentIngestor:
             document_id=doc_id,
             source_path=str(path.resolve()),
             media_type=suffix.lstrip("."),
-            extra={"source": str(path)},
+            access_label=access_label,
+            extra={"source": str(path), "access_label": access_label} if access_label else {"source": str(path)},
         )
 
         chunks: List[DocumentChunk] = []
@@ -152,8 +153,8 @@ class LangChainDocumentIngestor:
         return normalized
 
 
-def ingest_paths(*paths: Path, config: IngestionConfig | None = None) -> Sequence[DocumentChunk]:
+def ingest_paths(*paths: Path, config: IngestionConfig | None = None, access_label: str | None = None) -> Sequence[DocumentChunk]:
     """Convenience helper for tests and ad-hoc ingestion."""
 
     ingestor = LangChainDocumentIngestor(config=config)
-    return ingestor.ingest(list(paths))
+    return ingestor.ingest(list(paths), access_label=access_label)
